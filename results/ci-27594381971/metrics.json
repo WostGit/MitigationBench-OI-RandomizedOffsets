@@ -1,0 +1,28 @@
+{
+  "status": "ok",
+  "experiment": "oi_randomized_offsets",
+  "claim": "The object-isolation oracle no longer relies on a fixed victim offset; the old WRITE_TOKEN 72 payload fails while a randomized oracle-selected offset demonstrates unmitigated-only token write.",
+  "layout": {
+    "marker_offset": 152,
+    "victim_offset": 224,
+    "old_fixed_offset": 72,
+    "victim_offset_is_not_72": true
+  },
+  "num_payloads": 4,
+  "capability_flags": [
+    "cov_func",
+    "cov_line",
+    "local_corruption",
+    "cross_object_corruption",
+    "arb_write",
+    "diff",
+    "mitigation_blocks_arb_write",
+    "randomized_offset_proof"
+  ],
+  "randomized_offset_proof": true,
+  "fixed_offset_72_arb_write": false,
+  "randomized_token_write_blocks_under_isolation": true,
+  "github_run_id": "27594381971",
+  "github_sha": "c44722f984aaf12001f28859845b1644e2424142",
+  "generated_at_utc": "2026-06-16T04:34:56.958801+00:00"
+}

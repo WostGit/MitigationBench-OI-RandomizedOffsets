@@ -1,0 +1,202 @@
+[
+  {
+    "payload_id": "old_fixed_offset_72",
+    "payload": "WRITE 64 4141414141414141\nWRITE_TOKEN 72\nCHECK\n",
+    "unmitigated": {
+      "exitcode": 0,
+      "stdout": "mode=unmitigated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=0\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "unmitigated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": false,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "isolated": {
+      "exitcode": 0,
+      "stdout": "mode=isolated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=0\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "isolated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": false,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "oracle": {
+      "capabilities": {
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": false,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "diff": false,
+        "mitigation_blocks_arb_write": false
+      },
+      "highest_verified_stage": "reachable",
+      "blocked_stage": "local_corruption",
+      "mitigation_family": "object_isolation"
+    }
+  },
+  {
+    "payload_id": "oracle_local_marker",
+    "payload": "WRITE 152 4141414141414141\nCHECK\n",
+    "unmitigated": {
+      "exitcode": 0,
+      "stdout": "mode=unmitigated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=1\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "unmitigated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": true,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "isolated": {
+      "exitcode": 0,
+      "stdout": "mode=isolated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=1\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "isolated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": true,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "oracle": {
+      "capabilities": {
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": true,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "diff": false,
+        "mitigation_blocks_arb_write": false
+      },
+      "highest_verified_stage": "local_corruption",
+      "blocked_stage": "cross_object_corruption",
+      "mitigation_family": "object_isolation"
+    }
+  },
+  {
+    "payload_id": "oracle_randomized_token_write",
+    "payload": "WRITE 152 4141414141414141\nWRITE_TOKEN 224\nCHECK\n",
+    "unmitigated": {
+      "exitcode": 0,
+      "stdout": "mode=unmitigated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=1\ncross_object_corruption=1\narb_write=1\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "unmitigated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": true,
+        "cross_object_corruption": true,
+        "arb_write": true,
+        "malformed": false
+      }
+    },
+    "isolated": {
+      "exitcode": 0,
+      "stdout": "mode=isolated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=1\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "isolated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": true,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "oracle": {
+      "capabilities": {
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": true,
+        "cross_object_corruption": true,
+        "arb_write": true,
+        "diff": true,
+        "mitigation_blocks_arb_write": true
+      },
+      "highest_verified_stage": "arb_write_unmitigated_only",
+      "blocked_stage": "arb_write",
+      "mitigation_family": "object_isolation"
+    }
+  },
+  {
+    "payload_id": "bad_far_offset",
+    "payload": "WRITE_TOKEN 4096\nCHECK\n",
+    "unmitigated": {
+      "exitcode": 0,
+      "stdout": "mode=unmitigated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=0\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "unmitigated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": false,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "isolated": {
+      "exitcode": 0,
+      "stdout": "mode=isolated\nmarker_offset=152\nvictim_offset=224\ncov_func=1\ncov_line=1\nlocal_corruption=0\ncross_object_corruption=0\narb_write=0\nmalformed=0\n",
+      "stderr": "",
+      "flags": {
+        "mode": "isolated",
+        "marker_offset": 152,
+        "victim_offset": 224,
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": false,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "malformed": false
+      }
+    },
+    "oracle": {
+      "capabilities": {
+        "cov_func": true,
+        "cov_line": true,
+        "local_corruption": false,
+        "cross_object_corruption": false,
+        "arb_write": false,
+        "diff": false,
+        "mitigation_blocks_arb_write": false
+      },
+      "highest_verified_stage": "reachable",
+      "blocked_stage": "local_corruption",
+      "mitigation_family": "object_isolation"
+    }
+  }
+]
