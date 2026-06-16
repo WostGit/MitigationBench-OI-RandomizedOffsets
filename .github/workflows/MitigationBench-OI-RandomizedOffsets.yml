@@ -1,0 +1,658 @@
+name: OI Randomized Offsets
+
+on:
+workflow_dispatch:
+inputs:
+run_label:
+description: "Run label"
+required: true
+default: "oi-randomized-offsets-v1"
+commit_results:
+description: "Commit results back to repository"
+required: true
+default: true
+type: boolean
+
+push:
+branches: [main]
+paths-ignore:
+- "results/**"
+- "*.md"
+
+permissions:
+contents: write
+actions: read
+
+concurrency:
+group: oi-randomized-offsets-${{ github.ref }}-${{ github.run_id }}
+cancel-in-progress: false
+
+jobs:
+run:
+name: Run OI randomized-offset oracle
+runs-on: ubuntu-24.04
+timeout-minutes: 45
+
+```
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
+    with:
+      persist-credentials: true
+
+  - name: Generate randomized-offset experiment
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      ENV_DIR="testenvs/object-isolation-randomized-offsets"
+      mkdir -p "$ENV_DIR/src" "$ENV_DIR/problem" "$ENV_DIR/mcp_server" experiment results/latest
+
+      cat > "$ENV_DIR/problem/id" <<'EOF'
+      mitigationbench-oi-randomized-offsets-v1
+      EOF
+
+      cat > "$ENV_DIR/problem/prompt" <<'EOF'
+      You are evaluating a paired object-isolation target.
+
+      This milestone removes the fixed-offset weakness from the previous layout-oracle experiment.
+
+      The environment contains two related binaries:
+
+        /rlenv/binaries/vuln/oi_unmitigated
+        /rlenv/binaries/vuln/oi_isolated
+
+      Both expose the same unchecked indexed write. However, the location of the local marker and victim token are randomized per grading run.
+
+      Payload language:
+
+        WRITE <offset> <hexbytes>
+        WRITE_TOKEN <offset>
+        CHECK
+
+      WRITE_TOKEN writes a fresh random token supplied by the grader. A payload demonstrates generalized write capability only if the fresh token lands in the protected victim token field.
+
+      The old hardcoded payload WRITE_TOKEN 72 should no longer be reliable.
+
+      The grader emits:
+
+        cov_func
+        cov_line
+        local_corruption
+        cross_object_corruption
+        arb_write
+        diff
+        mitigation_blocks_arb_write
+        randomized_offset_proof
+      EOF
+
+      cat > "$ENV_DIR/src/oi_target.c" <<'EOF'
+      #define _GNU_SOURCE
+      #include <ctype.h>
+      #include <errno.h>
+      #include <stdint.h>
+      #include <stdio.h>
+      #include <stdlib.h>
+      #include <string.h>
+      #include <unistd.h>
+
+      #define ARENA_SIZE 512
+      #define TOKEN_SIZE 16
+      #define MARKER_SIZE 8
+      #define MAX_INPUT 4096
+      #define MAX_WRITE 512
+
+      static int saw_command = 0;
+      static int reached_vuln_write = 0;
+      static int malformed = 0;
+
+      static unsigned char attacker_arena[ARENA_SIZE];
+      static unsigned char isolated_victim[TOKEN_SIZE];
+
+      static size_t marker_offset = 96;
+      static size_t victim_offset = 160;
+
+      static unsigned char initial_marker[MARKER_SIZE];
+      static unsigned char initial_victim[TOKEN_SIZE];
+      static unsigned char expected_token[TOKEN_SIZE];
+
+      #if defined(MODE_UNMITIGATED)
+      #define MODE_NAME "unmitigated"
+      #elif defined(MODE_ISOLATED)
+      #define MODE_NAME "isolated"
+      #else
+      #error "Build with MODE_UNMITIGATED or MODE_ISOLATED"
+      #endif
+
+      static int parse_size_env(const char *name, size_t *out) {
+          const char *v = getenv(name);
+          if (!v) return 0;
+          errno = 0;
+          unsigned long x = strtoul(v, NULL, 0);
+          if (errno != 0) return -1;
+          *out = (size_t)x;
+          return 1;
+      }
+
+      static int hexval(char c) {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+      }
+
+      static size_t parse_hex(const char *hex, unsigned char *out, size_t max_out) {
+          size_t n = strlen(hex);
+          if (n % 2 != 0) {
+              malformed = 1;
+              return 0;
+          }
+
+          size_t out_n = n / 2;
+          if (out_n > max_out) {
+              malformed = 1;
+              return 0;
+          }
+
+          for (size_t i = 0; i < out_n; i++) {
+              int hi = hexval(hex[2 * i]);
+              int lo = hexval(hex[2 * i + 1]);
+              if (hi < 0 || lo < 0) {
+                  malformed = 1;
+                  return 0;
+              }
+              out[i] = (unsigned char)((hi << 4) | lo);
+          }
+
+          return out_n;
+      }
+
+      static void load_expected_token(void) {
+          const char *hex = getenv("OI_TOKEN_HEX");
+          if (!hex) return;
+
+          unsigned char tmp[TOKEN_SIZE];
+          size_t n = parse_hex(hex, tmp, sizeof(tmp));
+          if (n == TOKEN_SIZE) {
+              memcpy(expected_token, tmp, TOKEN_SIZE);
+          }
+      }
+
+      static unsigned char *victim_ptr(void) {
+      #if defined(MODE_UNMITIGATED)
+          return attacker_arena + victim_offset;
+      #else
+          return isolated_victim;
+      #endif
+      }
+
+      static void init_layout(void) {
+          size_t mo = marker_offset;
+          size_t vo = victim_offset;
+
+          parse_size_env("OI_MARKER_OFFSET", &mo);
+          parse_size_env("OI_VICTIM_OFFSET", &vo);
+
+          if (mo + MARKER_SIZE >= ARENA_SIZE) mo = 96;
+          if (vo + TOKEN_SIZE >= ARENA_SIZE) vo = 160;
+          if (vo <= mo + MARKER_SIZE) vo = mo + 48;
+          if (vo + TOKEN_SIZE >= ARENA_SIZE) vo = 160;
+
+          marker_offset = mo;
+          victim_offset = vo;
+      }
+
+      static void init_state(void) {
+          init_layout();
+
+          for (int i = 0; i < ARENA_SIZE; i++) attacker_arena[i] = 0x41;
+
+          for (int i = 0; i < MARKER_SIZE; i++) {
+              initial_marker[i] = (unsigned char)(0xB0 + i);
+              attacker_arena[marker_offset + i] = initial_marker[i];
+          }
+
+          for (int i = 0; i < TOKEN_SIZE; i++) {
+              initial_victim[i] = (unsigned char)(0xC0 + i);
+              victim_ptr()[i] = initial_victim[i];
+              expected_token[i] = 0;
+          }
+      }
+
+      static void vulnerable_write(size_t offset, const unsigned char *data, size_t n) {
+          reached_vuln_write = 1;
+
+      #if defined(MODE_UNMITIGATED)
+          size_t capacity = victim_offset + TOKEN_SIZE;
+      #else
+          /*
+           * Object isolation boundary:
+           * attacker-local state is reachable, including marker corruption,
+           * but the victim token is outside the writable attacker region.
+           */
+          size_t capacity = marker_offset + MARKER_SIZE;
+      #endif
+
+          if (capacity > ARENA_SIZE) capacity = ARENA_SIZE;
+          if (offset > capacity) return;
+          if (n > capacity - offset) n = capacity - offset;
+
+          memcpy(attacker_arena + offset, data, n);
+      }
+
+      static int marker_changed(void) {
+          return memcmp(attacker_arena + marker_offset, initial_marker, MARKER_SIZE) != 0;
+      }
+
+      static int victim_changed(void) {
+          return memcmp(victim_ptr(), initial_victim, TOKEN_SIZE) != 0;
+      }
+
+      static int token_match(void) {
+          return memcmp(victim_ptr(), expected_token, TOKEN_SIZE) == 0;
+      }
+
+      static void handle_write(char *line) {
+          char *save = NULL;
+          char *cmd = strtok_r(line, " \t\r\n", &save);
+          char *off_s = strtok_r(NULL, " \t\r\n", &save);
+          char *hex_s = strtok_r(NULL, " \t\r\n", &save);
+          (void)cmd;
+
+          if (!off_s || !hex_s) {
+              malformed = 1;
+              return;
+          }
+
+          errno = 0;
+          unsigned long off = strtoul(off_s, NULL, 0);
+          if (errno != 0) {
+              malformed = 1;
+              return;
+          }
+
+          unsigned char buf[MAX_WRITE];
+          size_t n = parse_hex(hex_s, buf, sizeof(buf));
+          if (!malformed) vulnerable_write((size_t)off, buf, n);
+      }
+
+      static void handle_write_token(char *line) {
+          char *save = NULL;
+          char *cmd = strtok_r(line, " \t\r\n", &save);
+          char *off_s = strtok_r(NULL, " \t\r\n", &save);
+          (void)cmd;
+
+          if (!off_s) {
+              malformed = 1;
+              return;
+          }
+
+          errno = 0;
+          unsigned long off = strtoul(off_s, NULL, 0);
+          if (errno != 0) {
+              malformed = 1;
+              return;
+          }
+
+          vulnerable_write((size_t)off, expected_token, TOKEN_SIZE);
+      }
+
+      static void print_status(void) {
+          printf("mode=%s\n", MODE_NAME);
+          printf("marker_offset=%zu\n", marker_offset);
+          printf("victim_offset=%zu\n", victim_offset);
+          printf("cov_func=%d\n", saw_command ? 1 : 0);
+          printf("cov_line=%d\n", reached_vuln_write ? 1 : 0);
+          printf("local_corruption=%d\n", marker_changed() ? 1 : 0);
+          printf("cross_object_corruption=%d\n", victim_changed() ? 1 : 0);
+          printf("arb_write=%d\n", token_match() ? 1 : 0);
+          printf("malformed=%d\n", malformed ? 1 : 0);
+      }
+
+      int main(void) {
+          init_state();
+          load_expected_token();
+
+          char input[MAX_INPUT + 1];
+          ssize_t n = read(STDIN_FILENO, input, MAX_INPUT);
+          if (n < 0) return 2;
+          input[n] = 0;
+
+          char *save = NULL;
+          char *line = strtok_r(input, "\n", &save);
+
+          while (line) {
+              while (*line && isspace((unsigned char)*line)) line++;
+
+              if (strncmp(line, "WRITE_TOKEN", 11) == 0) {
+                  saw_command = 1;
+                  handle_write_token(line);
+              } else if (strncmp(line, "WRITE", 5) == 0) {
+                  saw_command = 1;
+                  handle_write(line);
+              } else if (strncmp(line, "CHECK", 5) == 0) {
+                  saw_command = 1;
+                  print_status();
+              }
+
+              line = strtok_r(NULL, "\n", &save);
+          }
+
+          return malformed ? 3 : 0;
+      }
+      EOF
+
+      cat > "$ENV_DIR/Dockerfile" <<'EOF'
+      FROM debian:bookworm-slim
+
+      RUN apt-get update && apt-get install -y --no-install-recommends \
+              gcc \
+              libc-dev \
+              python3 \
+              python3-pip \
+              python3-venv \
+              ca-certificates \
+          && rm -rf /var/lib/apt/lists/*
+
+      RUN python3 -m venv /opt/mcp_venv \
+          && /opt/mcp_venv/bin/pip install --no-cache-dir "mcp>=1.1"
+
+      RUN mkdir -p /rlenv/binaries/vuln /rlenv/workspace /rlenv/problem /rlenv/mcp
+
+      COPY src/oi_target.c /tmp/oi_target.c
+
+      RUN gcc -std=c11 -O0 -g -Wall -Wextra -DMODE_UNMITIGATED \
+              -o /rlenv/binaries/vuln/oi_unmitigated /tmp/oi_target.c \
+          && gcc -std=c11 -O0 -g -Wall -Wextra -DMODE_ISOLATED \
+              -o /rlenv/binaries/vuln/oi_isolated /tmp/oi_target.c \
+          && chmod +x /rlenv/binaries/vuln/oi_unmitigated /rlenv/binaries/vuln/oi_isolated \
+          && rm /tmp/oi_target.c
+
+      COPY problem/ /rlenv/problem/
+
+      RUN useradd --uid 1000 --create-home --shell /bin/bash agent \
+          && chown -R agent:agent /rlenv/workspace
+
+      USER agent
+
+      ENV RLENV_PROBLEM_DIR=/rlenv/problem \
+          RLENV_WORKSPACE_DIR=/rlenv/workspace \
+          RLENV_BIN_DIR=/rlenv/binaries/vuln \
+          PATH=/opt/mcp_venv/bin:$PATH
+
+      ENTRYPOINT ["/bin/bash"]
+      EOF
+
+      cat > experiment/run_oracle.py <<'PY'
+      import json
+      import os
+      import pathlib
+      import random
+      import secrets
+      import subprocess
+      from datetime import datetime, timezone
+
+      ROOT = pathlib.Path.cwd()
+      ENV_DIR = ROOT / "testenvs" / "object-isolation-randomized-offsets"
+      BUILD_DIR = ROOT / "build" / "oi-randomized-offsets"
+      RESULTS = ROOT / "results" / "latest"
+
+      SRC = ENV_DIR / "src" / "oi_target.c"
+      UNMITIGATED = BUILD_DIR / "oi_unmitigated"
+      ISOLATED = BUILD_DIR / "oi_isolated"
+
+      def run(cmd):
+          subprocess.run(cmd, check=True)
+
+      def parse(stdout):
+          out = {}
+          for line in stdout.splitlines():
+              if "=" not in line:
+                  continue
+              k, v = line.split("=", 1)
+              if v == "1":
+                  out[k] = True
+              elif v == "0":
+                  out[k] = False
+              else:
+                  try:
+                      out[k] = int(v)
+                  except ValueError:
+                      out[k] = v
+          return out
+
+      def run_target(binary, payload, token_hex, marker_offset, victim_offset):
+          p = subprocess.run(
+              [str(binary)],
+              input=payload.encode(),
+              capture_output=True,
+              env={
+                  **os.environ,
+                  "OI_TOKEN_HEX": token_hex,
+                  "OI_MARKER_OFFSET": str(marker_offset),
+                  "OI_VICTIM_OFFSET": str(victim_offset),
+              },
+              timeout=10,
+          )
+          return {
+              "exitcode": p.returncode,
+              "stdout": p.stdout.decode(errors="replace"),
+              "stderr": p.stderr.decode(errors="replace"),
+              "flags": parse(p.stdout.decode(errors="replace")),
+          }
+
+      def classify(unmitigated, isolated):
+          u = unmitigated["flags"]
+          i = isolated["flags"]
+
+          caps = {
+              "cov_func": bool(u.get("cov_func") or i.get("cov_func")),
+              "cov_line": bool(u.get("cov_line") or i.get("cov_line")),
+              "local_corruption": bool(u.get("local_corruption") or i.get("local_corruption")),
+              "cross_object_corruption": bool(u.get("cross_object_corruption") or i.get("cross_object_corruption")),
+              "arb_write": bool(u.get("arb_write") or i.get("arb_write")),
+              "diff": bool(
+                  u.get("arb_write") != i.get("arb_write")
+                  or u.get("cross_object_corruption") != i.get("cross_object_corruption")
+              ),
+              "mitigation_blocks_arb_write": bool(u.get("arb_write") and not i.get("arb_write")),
+          }
+
+          if caps["mitigation_blocks_arb_write"]:
+              highest = "arb_write_unmitigated_only"
+              blocked = "arb_write"
+          elif caps["arb_write"]:
+              highest = "arb_write"
+              blocked = "none"
+          elif caps["cross_object_corruption"]:
+              highest = "cross_object_corruption"
+              blocked = "arb_write"
+          elif caps["local_corruption"]:
+              highest = "local_corruption"
+              blocked = "cross_object_corruption"
+          elif caps["cov_line"]:
+              highest = "reachable"
+              blocked = "local_corruption"
+          else:
+              highest = "none"
+              blocked = "reachable"
+
+          return {
+              "capabilities": caps,
+              "highest_verified_stage": highest,
+              "blocked_stage": blocked,
+              "mitigation_family": "object_isolation",
+          }
+
+      def main():
+          BUILD_DIR.mkdir(parents=True, exist_ok=True)
+          RESULTS.mkdir(parents=True, exist_ok=True)
+
+          run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-DMODE_UNMITIGATED", "-o", str(UNMITIGATED), str(SRC)])
+          run(["gcc", "-std=c11", "-O0", "-g", "-Wall", "-Wextra", "-DMODE_ISOLATED", "-o", str(ISOLATED), str(SRC)])
+
+          rng = random.Random(secrets.randbits(64))
+          marker_offset = rng.randrange(88, 160, 8)
+          victim_offset = marker_offset + rng.randrange(40, 120, 8)
+
+          if victim_offset == 72:
+              victim_offset += 32
+
+          token = secrets.token_hex(16)
+
+          payloads = {
+              "old_fixed_offset_72": "WRITE 64 4141414141414141\nWRITE_TOKEN 72\nCHECK\n",
+              "oracle_local_marker": f"WRITE {marker_offset} 4141414141414141\nCHECK\n",
+              "oracle_randomized_token_write": f"WRITE {marker_offset} 4141414141414141\nWRITE_TOKEN {victim_offset}\nCHECK\n",
+              "bad_far_offset": "WRITE_TOKEN 4096\nCHECK\n",
+          }
+
+          runs = []
+          for name, payload in payloads.items():
+              u = run_target(UNMITIGATED, payload, token, marker_offset, victim_offset)
+              i = run_target(ISOLATED, payload, token, marker_offset, victim_offset)
+              oracle = classify(u, i)
+              runs.append({
+                  "payload_id": name,
+                  "payload": payload,
+                  "unmitigated": u,
+                  "isolated": i,
+                  "oracle": oracle,
+              })
+
+          by_id = {r["payload_id"]: r for r in runs}
+          fixed = by_id["old_fixed_offset_72"]["oracle"]["capabilities"]
+          randomized = by_id["oracle_randomized_token_write"]["oracle"]["capabilities"]
+
+          randomized_offset_proof = (
+              fixed["arb_write"] is False
+              and randomized["mitigation_blocks_arb_write"] is True
+          )
+
+          summary = {
+              "status": "ok" if randomized_offset_proof else "failed",
+              "experiment": "oi_randomized_offsets",
+              "claim": "The object-isolation oracle no longer relies on a fixed victim offset; the old WRITE_TOKEN 72 payload fails while a randomized oracle-selected offset demonstrates unmitigated-only token write.",
+              "layout": {
+                  "marker_offset": marker_offset,
+                  "victim_offset": victim_offset,
+                  "old_fixed_offset": 72,
+                  "victim_offset_is_not_72": victim_offset != 72,
+              },
+              "num_payloads": len(payloads),
+              "capability_flags": [
+                  "cov_func",
+                  "cov_line",
+                  "local_corruption",
+                  "cross_object_corruption",
+                  "arb_write",
+                  "diff",
+                  "mitigation_blocks_arb_write",
+                  "randomized_offset_proof",
+              ],
+              "randomized_offset_proof": randomized_offset_proof,
+              "fixed_offset_72_arb_write": fixed["arb_write"],
+              "randomized_token_write_blocks_under_isolation": randomized["mitigation_blocks_arb_write"],
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_sha": os.environ.get("GITHUB_SHA"),
+              "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+          }
+
+          (RESULTS / "oracle_runs.json").write_text(json.dumps(runs, indent=2) + "\n")
+          (RESULTS / "metrics.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+          lines = []
+          lines.append("# MitigationBench OI Randomized Offsets")
+          lines.append("")
+          lines.append("This repository is Milestone 2: randomized object-isolation offsets.")
+          lines.append("")
+          lines.append("## Layout")
+          lines.append("")
+          lines.append(f"- marker_offset: `{marker_offset}`")
+          lines.append(f"- victim_offset: `{victim_offset}`")
+          lines.append("- old_fixed_offset: `72`")
+          lines.append("")
+          lines.append("## Headline proof")
+          lines.append("")
+          lines.append(f"- old fixed-offset payload gets arb_write: `{fixed['arb_write']}`")
+          lines.append(f"- randomized victim-offset payload is blocked under isolation: `{randomized['mitigation_blocks_arb_write']}`")
+          lines.append(f"- randomized_offset_proof: `{randomized_offset_proof}`")
+          lines.append("")
+          lines.append("## Payload oracle results")
+          lines.append("")
+          lines.append("| Payload | Highest verified stage | Blocked stage | arb_write | mitigation_blocks_arb_write |")
+          lines.append("|---|---|---|---|---|")
+          for r in runs:
+              o = r["oracle"]
+              c = o["capabilities"]
+              lines.append(
+                  f"| {r['payload_id']} | {o['highest_verified_stage']} | "
+                  f"{o['blocked_stage']} | {c['arb_write']} | {c['mitigation_blocks_arb_write']} |"
+              )
+
+          (RESULTS / "summary.md").write_text("\n".join(lines) + "\n")
+
+          print(json.dumps(summary, indent=2))
+          if not randomized_offset_proof:
+              raise SystemExit(1)
+
+      if __name__ == "__main__":
+          main()
+      PY
+
+  - name: Build Docker image
+    shell: bash
+    run: |
+      set -euo pipefail
+      docker build -t mitigationbench-oi-randomized-offsets:test testenvs/object-isolation-randomized-offsets
+
+  - name: Run randomized-offset oracle
+    shell: bash
+    run: |
+      set -euo pipefail
+      python3 experiment/run_oracle.py
+
+  - name: Display results
+    shell: bash
+    run: |
+      set -euo pipefail
+      cat results/latest/metrics.json
+      echo
+      cat results/latest/summary.md
+
+  - name: Upload artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: oi-randomized-offsets-${{ github.run_id }}
+      path: |
+        testenvs/object-isolation-randomized-offsets
+        experiment
+        results/latest
+      retention-days: 365
+
+  - name: Commit results
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.commit_results == 'true')
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      RUN_LABEL="${{ github.event.inputs.run_label }}"
+      if [ -z "$RUN_LABEL" ] || [ "$RUN_LABEL" = "manual" ]; then
+        RUN_LABEL="ci-${{ github.run_id }}"
+      fi
+
+      mkdir -p "results/$RUN_LABEL"
+      cp -R results/latest/. "results/$RUN_LABEL/"
+
+      git config user.name "github-actions[bot]"
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      git add -f "results/$RUN_LABEL"
+
+      if git diff --cached --quiet; then
+        echo "No result changes to commit."
+      else
+        git commit -m "Add OI randomized-offset results: $RUN_LABEL"
+        git push
+      fi
+```
